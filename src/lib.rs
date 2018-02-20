@@ -197,11 +197,15 @@ fn parse(s: &InputSexp) -> Result<SourceCode, String> {
 ///////////////////////////////////////////////////////////////////////////
 
 fn name_to_envindex(envvars: &[String], argvars: &[String], n: &str) -> Result<EnvIndex, String> {
-    if let Some(i) = envvars.iter().position(|e| e == n) {
-        return Ok(EnvIndex::Env(i))
-    }
+    // Check argvars first, because they must shadow envvars. (As it
+    // happens, it turns out this isn't important, because free_vars
+    // already correctly avoids even making a shadowed environment
+    // value available.)
     if let Some(i) = argvars.iter().position(|e| e == n) {
         return Ok(EnvIndex::Arg(i))
+    }
+    if let Some(i) = envvars.iter().position(|e| e == n) {
+        return Ok(EnvIndex::Env(i))
     }
     Err("Unbound variable: ".to_owned() + n)
 }
@@ -322,7 +326,22 @@ mod tests {
                        vec![Lit(Atom(Num(123))),
                             Lit(Atom(Num(234)))]),
                    parsed);
-        let compiled = compile(&vec!["cons".into(), "+".into()], &vec![], &parsed);
-        println!("compiled = {:?}", compiled);
+        assert_eq!(App(Box::new(Clo(vec![EnvIndex::Env(1)],
+                                    2,
+                                    Box::new(App(Box::new(Var(EnvIndex::Env(0))),
+                                                 vec![Var(EnvIndex::Arg(0)),
+                                                      Var(EnvIndex::Arg(1))])))),
+                       vec![Lit(Atom(Num(123))), Lit(Atom(Num(234)))]),
+                   compile(&vec!["cons".into(), "+".into()], &vec![], &parsed).unwrap());
+    }
+
+    #[test]
+    fn check_arg_shadowing() {
+        use Literal::*;
+        use Sexp::*;
+        use Instruction::*;
+        let parsed = parse(&read_one_sexp("(lambda (x) (lambda (x) x))").unwrap()).unwrap();
+        assert_eq!(Clo(vec![], 1, Box::new(Clo(vec![], 1, Box::new(Var(EnvIndex::Arg(0)))))),
+                   compile(&vec![], &vec![], &parsed).unwrap());
     }
 }
