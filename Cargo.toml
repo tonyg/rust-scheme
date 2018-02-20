@@ -1,0 +1,7 @@
+[package]
+name = "scheme"
+version = "0.0.1"
+authors = ["Tony Garnock-Jones <tonyg@leastfixedpoint.com>"]
+
+[dependencies]
+itertools = "*"
