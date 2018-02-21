@@ -680,18 +680,12 @@ impl<'a> Collection<'a> {
 ///////////////////////////////////////////////////////////////////////////
 
 fn encode_op(code: &mut Vec<u8>, b: Bytecode, iarg: i64) -> () {
-    let opcode = (b.clone() as u8) << 4;
+    let opcode = (b.clone() as u8) << 5;
     let uarg = if iarg < 0 { (((-iarg) as u64) << 1) | 1 } else { (iarg as u64) << 1 };
-    if uarg < 0xf {
+    if uarg < 0x1f {
         code.push(opcode | uarg as u8);
-    } else if uarg < 0xff {
-        code.push(opcode | 0xf);
-        code.push(uarg as u8);
-    } else if uarg < 0xffffffff {
-        code.push(opcode | 0xf);
-        code.push(0xff);
-        code.push((uarg >> 24) as u8);
-        code.push((uarg >> 16) as u8);
+    } else if uarg < 0xffff {
+        code.push(opcode | 0x1f);
         code.push((uarg >> 8) as u8);
         code.push(uarg as u8);
     } else {
@@ -729,24 +723,17 @@ fn decode_bytecode(n: u8) -> Option<Bytecode> {
 
 fn decode_op(code: &[u8], index: &mut usize) -> Option<(Bytecode, i64)> {
     let op = extract_u8(code, index)?;
-    let b = decode_bytecode(op >> 4)?;
-    let arg = op & 0xf;
-    if arg < 0xf {
+    let b = decode_bytecode(op >> 5)?;
+    let arg = op & 0x1f;
+    if arg < 0x1f {
         Some((b, undo_signed_conversion(arg as u64)))
     } else {
-        let arg = extract_u8(code, index)?;
-        if arg < 0xff {
+        let arg = extract_u8(code, index)? as u16;
+        let arg = (arg << 8) | (extract_u8(code, index)? as u16);
+        if arg < 0xffff {
             Some((b, undo_signed_conversion(arg as u64)))
         } else {
-            let arg = extract_u8(code, index)? as u64;
-            let arg = (arg << 8) | (extract_u8(code, index)? as u64);
-            let arg = (arg << 8) | (extract_u8(code, index)? as u64);
-            let arg = (arg << 8) | (extract_u8(code, index)? as u64);
-            if arg < 0xffffffff {
-                Some((b, undo_signed_conversion(arg)))
-            } else {
-                panic!("Opcode {:?} argument too large", b)
-            }
+            panic!("Opcode {:?} argument too large", b)
         }
     }
 }
@@ -1018,25 +1005,37 @@ mod tests {
         encode_op(&mut code, OpLiteral, 0);
         encode_op(&mut code, OpLiteral, 1);
         encode_op(&mut code, OpLiteral, 2);
+        encode_op(&mut code, OpLiteral, 14);
+        encode_op(&mut code, OpLiteral, 15);
+        encode_op(&mut code, OpLiteral, 16);
         encode_op(&mut code, OpLiteral, 20);
         encode_op(&mut code, OpLiteral, 2000);
         encode_op(&mut code, OpCallFrame, 0);
         encode_op(&mut code, OpCallFrame, -1);
         encode_op(&mut code, OpCallFrame, -2);
+        encode_op(&mut code, OpCallFrame, -14);
+        encode_op(&mut code, OpCallFrame, -15);
+        encode_op(&mut code, OpCallFrame, -16);
         encode_op(&mut code, OpCallFrame, -20);
         encode_op(&mut code, OpCallFrame, -2000);
-        assert_eq!([0x00, 0x02, 0x04, 0x0f, 40, 0x0f, 0xff, 0, 0, 15, 160,
-                    0x40, 0x43, 0x45, 0x4f, 41, 0x4f, 0xff, 0, 0, 15, 161],
+        assert_eq!([0x00, 0x02, 0x04, 0x1c, 0x1e, 0x1f, 0, 32, 0x1f, 0, 40, 0x1f, 15, 160,
+                    0x80, 0x83, 0x85, 0x9d, 0x9f, 0, 31, 0x9f, 0, 33, 0x9f, 0, 41, 0x9f, 15, 161],
                    code.as_slice());
         let mut index = 0;
         assert_eq!((OpLiteral, 0), decode_op(&code, &mut index).unwrap());
         assert_eq!((OpLiteral, 1), decode_op(&code, &mut index).unwrap());
         assert_eq!((OpLiteral, 2), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpLiteral, 14), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpLiteral, 15), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpLiteral, 16), decode_op(&code, &mut index).unwrap());
         assert_eq!((OpLiteral, 20), decode_op(&code, &mut index).unwrap());
         assert_eq!((OpLiteral, 2000), decode_op(&code, &mut index).unwrap());
         assert_eq!((OpCallFrame, 0), decode_op(&code, &mut index).unwrap());
         assert_eq!((OpCallFrame, -1), decode_op(&code, &mut index).unwrap());
         assert_eq!((OpCallFrame, -2), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpCallFrame, -14), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpCallFrame, -15), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpCallFrame, -16), decode_op(&code, &mut index).unwrap());
         assert_eq!((OpCallFrame, -20), decode_op(&code, &mut index).unwrap());
         assert_eq!((OpCallFrame, -2000), decode_op(&code, &mut index).unwrap());
 
@@ -1059,5 +1058,11 @@ mod tests {
         println!("{:?} {:?} {:?}", codepointer, lit, h);
         println!("{}", OopHeap(codepointer, &h));
         println!("{}", OopHeap(lit, &h));
+    }
+
+    #[test]
+    fn test_bytecode_range() {
+        // Supposed to ensure that we have 8 or fewer opcodes!
+        assert!((OpClosure as u8) < 8);
     }
 }
