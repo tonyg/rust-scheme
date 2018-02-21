@@ -310,6 +310,13 @@ struct Oop {
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
+enum DecodedOop {
+    Immediate(RawNum),
+    Bytes(RawOop),
+    Oops(RawOop)
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
 enum Header {
     Bytes(usize),
     Oops(usize),
@@ -323,14 +330,10 @@ struct Heap {
 
 impl std::fmt::Debug for Oop {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if self.is_num() {
-            write!(f, "#{}", self.numval())
-        } else if self.is_oops_ptr() {
-            write!(f, "@{}", self._ptrval())
-        } else if self.is_bytes_ptr() {
-            write!(f, "={}", self._ptrval())
-        } else {
-            panic!("Unknown oop: {}", self.raw)
+        match self.decode() {
+            DecodedOop::Immediate(n) => write!(f, "#{}", n),
+            DecodedOop::Bytes(v) => write!(f, "={}", v),
+            DecodedOop::Oops(v) => write!(f, "@{}", v)
         }
     }
 }
@@ -370,7 +373,7 @@ impl std::fmt::Debug for Heap {
             }
             write!(f, "\n")?;
         }
-        write!(f, "{:8}  (end)\n", self.space.len());
+        write!(f, "{:8}  (end)\n", self.space.len())?;
         write!(f, "}}\n")
     }
 }
@@ -435,26 +438,6 @@ impl<'a> std::fmt::Display for OopHeap<'a> {
 }
 
 impl Oop {
-    fn min_num() -> Oop {
-        Oop { raw: RawNum::min_value() as RawOop | 1 }
-    }
-    fn max_num() -> Oop {
-        Oop { raw: RawNum::max_value() as RawOop | 1 }
-    }
-
-    fn is_i64_in_range(n: i64) -> bool {
-        (n >= Oop::min_num().numval() as i64) & (n <= Oop::max_num().numval() as i64)
-    }
-    fn is_usize_in_range(n: usize) -> bool {
-        n <= Oop::max_num().numval() as usize
-    }
-    fn is_oops_len_in_range(len: usize) -> bool {
-        len <= (RawOop::max_value() >> 2) as usize
-    }
-    fn is_bytes_len_in_range(len: usize) -> bool {
-        len <= (RawOop::max_value() >> 2) as usize
-    }
-
     fn num(val: RawNum) -> Oop {
         Oop { raw: (val << 1) as RawOop | 1 }
     }
@@ -468,6 +451,18 @@ impl Oop {
         Oop::_ptr(val, true)
     }
 
+    fn decode(&self) -> DecodedOop {
+        if (self.raw & 1) == 1 {
+            DecodedOop::Immediate((self.raw as RawNum) >> 1)
+        } else if (self.raw & 3) == 2 {
+            DecodedOop::Bytes(self.raw >> 2)
+        } else if (self.raw & 3) == 0 {
+            DecodedOop::Oops(self.raw >> 2)
+        } else {
+            panic!("Unknown oop type: {:?}", self.raw)
+        }
+    }
+
     fn copy(&self) -> Oop {
         Oop { raw: self.raw }
     }
@@ -475,15 +470,8 @@ impl Oop {
     fn is_num(&self) -> bool {
         (self.raw & 1) == 1
     }
-
     fn _is_ptr(&self) -> bool {
         !self.is_num()
-    }
-    fn is_oops_ptr(&self) -> bool {
-        (self.raw & 3) == 0
-    }
-    fn is_bytes_ptr(&self) -> bool {
-        (self.raw & 3) == 2
     }
 
     fn numval(&self) -> RawNum {
@@ -595,9 +583,7 @@ impl Heap {
     }
 
     fn alloc_oops(&mut self, len: usize) -> Option<Oop> {
-        if !Oop::is_oops_len_in_range(len) {
-            panic!("Cannot inject oops of length {}", len);
-        }
+        if len >= self.space.len() { return None }
         self._alloc(len as RawOfs).map(|p| {
             let result = Oop::_oops_ptr(p);
             *(result._deref_w(self, 0)) = Header::Oops(len).to_oop();
@@ -619,10 +605,9 @@ impl Heap {
     }
 
     fn alloc_bytes(&mut self, len: usize) -> Option<Oop> {
-        if !Oop::is_bytes_len_in_range(len) {
-            panic!("Cannot inject bytes of length {}", len);
-        }
-        self._alloc(Heap::bytes_to_oops(len)).map(|p| {
+        let oop_count = Heap::bytes_to_oops(len);
+        if oop_count as usize >= self.space.len() { return None }
+        self._alloc(oop_count).map(|p| {
             let result = Oop::_bytes_ptr(p);
             *(result._deref_w(self, 0)) = Header::Bytes(len).to_oop();
             result
@@ -772,14 +757,12 @@ impl ProgramValue {
     fn inject(&self, h: &mut Heap) -> Option<Oop> {
         match self {
             &Atom(Lit(Num(n))) => {
-                if !Oop::is_i64_in_range(n) { panic!("Cannot inject number out of range {}", n) }
                 Some(Oop::num(n as RawNum))
             }
             &Atom(Lit(Sym(ref s))) => {
                 h.inject_bytes(s.as_bytes())
             }
             &Atom(Prim(n)) => {
-                if !Oop::is_usize_in_range(n) { panic!("Cannot inject primitive index {}", n) }
                 Some(Oop::num(n as RawNum))
             }
             &Atom(Clo(ref envspec, arity, ref codebox)) => {
@@ -998,16 +981,14 @@ mod tests {
         let r = Atom(Lit(Sym("pals".into()))).inject(&mut h).unwrap();
         assert_eq!(5, h.next);
 
-        assert!(p.is_bytes_ptr());
-        assert_eq!(0, p._ptrval());
+        assert_eq!(DecodedOop::Bytes(0), p.decode());
         assert_eq!(Header::Bytes(5), p.header(&h));
         assert_eq!("hello".as_bytes(), p.bytes_r(&h));
 
         assert!(q.is_num());
         assert_eq!(12345678, q.numval());
 
-        assert!(r.is_bytes_ptr());
-        assert_eq!(3, r._ptrval());
+        assert_eq!(DecodedOop::Bytes(3), r.decode());
         assert_eq!(Header::Bytes(4), r.header(&h));
         assert_eq!("pals".as_bytes(), r.bytes_r(&h));
 
@@ -1019,16 +1000,14 @@ mod tests {
 
         assert_eq!(5, h.next);
 
-        assert!(p.is_bytes_ptr());
-        assert_eq!(2, p._ptrval());
+        assert_eq!(DecodedOop::Bytes(2), p.decode());
         assert_eq!(Header::Bytes(5), p.header(&h));
         assert_eq!("hello".as_bytes(), p.bytes_r(&h));
 
         assert!(q.is_num());
         assert_eq!(12345678, q.numval());
 
-        assert!(r.is_bytes_ptr());
-        assert_eq!(0, r._ptrval());
+        assert_eq!(DecodedOop::Bytes(0), r.decode());
         assert_eq!(Header::Bytes(4), r.header(&h));
         assert_eq!("pals".as_bytes(), r.bytes_r(&h));
     }
