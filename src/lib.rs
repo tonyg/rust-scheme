@@ -284,7 +284,7 @@ fn err_type<T>() -> Result<T, String> {
     Err("Type mismatch".into())
 }
 
-fn prim_add(h: &mut Heap, args: &[Oop]) -> Result<Oop, String> {
+fn prim_add(_h: &mut Heap, args: &[Oop]) -> Result<Oop, String> {
     if args.len() != 2 { return err_arity() }
     if !args[0].is_num() { return err_type() }
     if !args[1].is_num() { return err_type() }
