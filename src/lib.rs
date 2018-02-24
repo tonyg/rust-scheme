@@ -43,8 +43,8 @@ enum Bytecode {
     OpLiteral, // indexIntoLiterals
     OpEnvRef, // indexIntoEnvironment
     OpArgRef, // indexIntoArguments
-    OpTailFrame, // countOfArguments
-    OpCallFrame, // countOfArguments
+    OpFrame, // countOfArguments
+    OpJump, // zero
     OpCall, // zero
     OpReturn, // zero
 
@@ -235,7 +235,7 @@ fn compile(envvars: &[String], argvars: &[String], s: &SourceCode) -> Result<Tar
                 Some(loc) => Ok(IVar(loc)),
                 None => // Primitive or unbound
                     match lookup_primitive(n) {
-                        Some(p) => Ok(ILit(Atom(Prim(p.index)))),
+                        Some((i,_p)) => Ok(ILit(Atom(Prim(i)))),
                         None => Err("Unbound variable: ".to_owned() + n)
                     }
             }
@@ -262,18 +262,20 @@ fn compile(envvars: &[String], argvars: &[String], s: &SourceCode) -> Result<Tar
 ///////////////////////////////////////////////////////////////////////////
 
 struct Primitive {
-    index: usize,
     name: &'static str,
     arity: usize,
     handler: fn(&mut Heap, &[Oop]) -> Result<Oop, String>,
 }
 
 static PRIMITIVES: &[Primitive] = &[
-    Primitive { index: 0, name: "+", arity: 2, handler: prim_add },
+    Primitive { name: "+", arity: 2, handler: prim_add },
+    Primitive { name: "print", arity: 1, handler: prim_print },
+    Primitive { name: "newline", arity: 0, handler: prim_newline },
+    Primitive { name: "println", arity: 1, handler: prim_println },
 ];
 
-fn lookup_primitive(n: &str) -> Option<&Primitive> {
-    PRIMITIVES.iter().find(|p| (*p).name == n)
+fn lookup_primitive(n: &str) -> Option<(usize, &Primitive)> {
+    PRIMITIVES.iter().enumerate().find(|p| (*(p.1)).name == n)
 }
 
 fn err_arity<T>() -> Result<T, String> {
@@ -285,10 +287,24 @@ fn err_type<T>() -> Result<T, String> {
 }
 
 fn prim_add(_h: &mut Heap, args: &[Oop]) -> Result<Oop, String> {
-    if args.len() != 2 { return err_arity() }
     if !args[0].is_num() { return err_type() }
     if !args[1].is_num() { return err_type() }
     Ok(Oop::num(args[0].numval() + args[1].numval()))
+}
+
+fn prim_print(h: &mut Heap, args: &[Oop]) -> Result<Oop, String> {
+    print!("{}", OopHeap(args[0], h));
+    Ok(Oop::num(0))
+}
+
+fn prim_newline(_h: &mut Heap, _args: &[Oop]) -> Result<Oop, String> {
+    println!("");
+    Ok(Oop::num(0))
+}
+
+fn prim_println(h: &mut Heap, args: &[Oop]) -> Result<Oop, String> {
+    println!("{}", OopHeap(args[0], h));
+    Ok(Oop::num(0))
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -389,7 +405,7 @@ fn printable_utf8<'a>(bs: &'a [u8]) -> Option<&'a str> {
     }
 }
 
-fn valid_bytecode(bs: &[u8]) -> Option<Vec<(Bytecode, i64)>> {
+fn valid_bytecode(bs: &[u8]) -> Option<Vec<(Bytecode, usize)>> {
     let mut items = Vec::new();
     let mut index = 0;
     loop {
@@ -422,10 +438,11 @@ impl<'a> std::fmt::Display for OopHeap<'a> {
                     }
                 }
                 Header::Oops(len) => {
+                    let oops = oop.oops_r(h);
                     write!(f, "(")?;
                     if len > 0 {
-                        write!(f, "{}", OopHeap(oop.get(h, 0).unwrap(), h))?;
-                        for i in 1..len { write!(f, " {}", OopHeap(oop.get(h, i).unwrap(), h))? }
+                        write!(f, "{}", OopHeap(oops[0], h))?;
+                        for i in 1..len { write!(f, " {}", OopHeap(oops[i], h))? }
                     }
                     write!(f, ")")
                 }
@@ -524,27 +541,20 @@ impl Oop {
         }
     }
 
-    fn get<'a>(&self, h: &'a Heap, index: usize) -> Option<Oop> {
+    fn oops_r<'a>(&self, h: &'a Heap) -> &'a [Oop] {
         if let Header::Oops(len) = self.header(h) {
-            if index < len {
-                Some(self._deref_r(h, index + 1))
-            } else {
-                None
-            }
+            let lo = self._ptrval() as usize + 1;
+            &h.space[lo..(lo+len)]
         } else {
-            panic!("Attempted to extract slot of non-oops oop {:?}", self);
+            panic!("Attempted to read slots of non-oops oop {:?}", self);
         }
     }
-    fn set(&self, h: &mut Heap, index: usize, v: Oop) -> Option<()> {
+    fn oops_w<'a>(&self, h: &'a mut Heap) -> &'a mut [Oop] {
         if let Header::Oops(len) = self.header(h) {
-            if index < len {
-                *(self._deref_w(h, index + 1)) = v;
-                Some(())
-            } else {
-                None
-            }
+            let lo = self._ptrval() as usize + 1;
+            &mut h.space[lo..(lo+len)]
         } else {
-            panic!("Attempted to update slot of non-oops oop {:?}", self);
+            panic!("Attempted to write slots of non-oops oop {:?}", self);
         }
     }
 }
@@ -593,8 +603,9 @@ impl Heap {
 
     fn inject_oops(&mut self, oops: &[Oop]) -> Option<Oop> {
         let oop = self.alloc_oops(oops.len())?;
+        let w = oop.oops_w(self);
         for i in 0..oops.len() {
-            oop.set(self, i, oops[i])?;
+            w[i] = oops[i];
         }
         Some(oop)
     }
@@ -679,9 +690,8 @@ impl<'a> Collection<'a> {
 
 ///////////////////////////////////////////////////////////////////////////
 
-fn encode_op(code: &mut Vec<u8>, b: Bytecode, iarg: i64) -> () {
+fn encode_op(code: &mut Vec<u8>, b: Bytecode, uarg: usize) -> () {
     let opcode = (b.clone() as u8) << 5;
-    let uarg = if iarg < 0 { (((-iarg) as u64) << 1) | 1 } else { (iarg as u64) << 1 };
     if uarg < 0x1f {
         code.push(opcode | uarg as u8);
     } else if uarg < 0xffff {
@@ -689,7 +699,7 @@ fn encode_op(code: &mut Vec<u8>, b: Bytecode, iarg: i64) -> () {
         code.push((uarg >> 8) as u8);
         code.push(uarg as u8);
     } else {
-        panic!("Cannot emit {:?} with argument {}", b, iarg)
+        panic!("Cannot emit {:?} with argument {}", b, uarg)
     }
 }
 
@@ -703,17 +713,13 @@ fn extract_u8(code: &[u8], index: &mut usize) -> Option<u8> {
     }
 }
 
-fn undo_signed_conversion(n: u64) -> i64 {
-    if (n & 1) == 1 { -((n >> 1) as i64) } else { (n >> 1) as i64 }
-}
-
 fn decode_bytecode(n: u8) -> Option<Bytecode> {
     match n {
         0 => Some(OpLiteral),
         1 => Some(OpEnvRef),
         2 => Some(OpArgRef),
-        3 => Some(OpTailFrame),
-        4 => Some(OpCallFrame),
+        3 => Some(OpFrame),
+        4 => Some(OpJump),
         5 => Some(OpCall),
         6 => Some(OpReturn),
         7 => Some(OpClosure),
@@ -721,17 +727,17 @@ fn decode_bytecode(n: u8) -> Option<Bytecode> {
     }
 }
 
-fn decode_op(code: &[u8], index: &mut usize) -> Option<(Bytecode, i64)> {
+fn decode_op(code: &[u8], index: &mut usize) -> Option<(Bytecode, usize)> {
     let op = extract_u8(code, index)?;
     let b = decode_bytecode(op >> 5)?;
     let arg = op & 0x1f;
     if arg < 0x1f {
-        Some((b, undo_signed_conversion(arg as u64)))
+        Some((b, arg as usize))
     } else {
         let arg = extract_u8(code, index)? as u16;
         let arg = (arg << 8) | (extract_u8(code, index)? as u16);
         if arg < 0xffff {
-            Some((b, undo_signed_conversion(arg as u64)))
+            Some((b, arg as usize))
         } else {
             panic!("Opcode {:?} argument too large", b)
         }
@@ -764,20 +770,21 @@ impl ProgramValue {
 
                 let (codepointer, lit) = codebox.inject(h)?;
                 let clo = h.alloc_oops(envspec.len() + 3)?;
-                clo.set(h, 0, Oop::num(arity as RawNum))?;
-                clo.set(h, 1, codepointer)?;
-                clo.set(h, 2, lit)?;
+                {
+                    let w = clo.oops_w(h);
+                    w[0] = Oop::num(arity as RawNum);
+                    w[1] = codepointer;
+                    w[2] = lit;
+                }
                 for i in 0..envspec.len() {
-                    let p = envspec[i].inject(h)?;
-                    clo.set(h, i + 3, p)?;
+                    clo.oops_w(h)[i + 3] = envspec[i].inject(h)?;
                 }
                 Some(clo)
             }
             &List(ref elts) => {
                 let p = h.alloc_oops(elts.len())?;
                 for i in 0..elts.len() {
-                    let q = elts[i].inject(h)?;
-                    p.set(h, i, q)?;
+                    p.oops_w(h)[i] = elts[i].inject(h)?;
                 }
                 Some(p)
             }
@@ -804,34 +811,32 @@ impl TargetCode {
     {
         match self {
             &ILit(ref v) => {
-                encode_op(codevec, OpLiteral, literals.len() as i64);
+                encode_op(codevec, OpLiteral, literals.len());
                 if tail { encode_op(codevec, OpReturn, 0) }
                 literals.push(v.inject(h)?);
                 Some(())
             }
             &IVar(Env(n)) => {
-                encode_op(codevec, OpEnvRef, n as i64);
+                encode_op(codevec, OpEnvRef, n);
                 if tail { encode_op(codevec, OpReturn, 0) }
                 Some(())
             }
             &IVar(Arg(n)) => {
-                encode_op(codevec, OpArgRef, n as i64);
+                encode_op(codevec, OpArgRef, n);
                 if tail { encode_op(codevec, OpReturn, 0) }
                 Some(())
             }
             &IApp(ref ratorbox, ref rands) => {
-                encode_op(codevec,
-                          if tail { OpTailFrame } else { OpCallFrame },
-                          rands.len() as i64);
+                encode_op(codevec, OpFrame, rands.len());
                 ratorbox._inject(h, codevec, literals, false)?;
                 for rand in rands {
                     rand._inject(h, codevec, literals, false)?;
                 }
-                encode_op(codevec, OpCall, 0);
+                encode_op(codevec, if tail { OpJump } else { OpCall }, 0);
                 Some(())
             }
             &IClo(ref captures, formals, ref bodybox) => {
-                encode_op(codevec, OpClosure, literals.len() as i64);
+                encode_op(codevec, OpClosure, literals.len());
                 let (codepointer, lit) = bodybox.inject(h)?;
                 literals.push(Oop::num(formals as RawNum));
                 literals.push(codepointer);
@@ -844,6 +849,190 @@ impl TargetCode {
                     }));
                 }
                 Some(())
+            }
+        }
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+struct VM {
+    h: Heap,
+    a: Oop,
+    i: usize,
+    f: Oop,
+}
+
+impl VM {
+    fn boot(mut h: Heap, code: Oop, lits: Oop) -> VM {
+        let c = h.inject_oops(&[Oop::num(0), code, lits]).unwrap();
+        let a = h.inject_oops(&[c, Oop::num(0), Oop::num(0)]).unwrap();
+        let f = h.inject_oops(&[Oop::num(0), Oop::num(0), Oop::num(0)]).unwrap();
+        VM { h: h, a: a, i: 0, f: f }
+    }
+
+    fn _arg(&self, i: usize) -> Oop {
+        self.a.oops_r(&self.h)[i]
+    }
+    fn arg(&self, i: usize) -> Oop {
+        self._arg(i + 1)
+    }
+    fn argc(&self) -> usize {
+        self.a.oops_r(&self.h).len() - 3 // 1 for the closure, two for saved I/A
+    }
+    fn _closure(&self) -> &[Oop] {
+        self._arg(0).oops_r(&self.h)
+    }
+    fn code(&self) -> &[u8] {
+        self._closure()[1].bytes_r(&self.h)
+    }
+    fn lit(&self, i: usize) -> Oop {
+        self._closure()[2].oops_r(&self.h)[i]
+    }
+    fn env(&self, i: usize) -> Oop {
+        self._closure()[i+3]
+    }
+    fn store(&mut self, v: Oop) -> () {
+        let w = self.f.oops_w(&mut self.h);
+        let len = w.len();
+        let index = w[len-1].numval() as usize;
+        w[index] = v;
+        w[len-1] = Oop::num((index + 1) as RawNum);
+    }
+    fn gc(&mut self) -> () {
+        self.h = {
+            let mut c = Collection::new(&mut self.h);
+            self.a = c.gc_copy(self.a);
+            self.f = c.gc_copy(self.f);
+            c.new
+        }
+    }
+    fn alloc_oops(&mut self, n: usize) -> Oop {
+        self.h.alloc_oops(n).unwrap_or_else(|| {
+            self.gc();
+            self.h.alloc_oops(n).unwrap_or_else(|| {
+                panic!("Could not allocate {} slots after gc", n)
+            })
+        })
+    }
+    fn pushframe(&mut self, n: usize) -> () {
+        let new_f = self.alloc_oops(n + 3); // 1 for closure, 2 for saved I/A
+        let w = new_f.oops_w(&mut self.h);
+        let len = w.len();
+        w[len-2] = self.f;
+        w[len-1] = Oop::num(0);
+        self.f = new_f;
+    }
+    fn trap_check(&mut self) -> () {
+        if self._arg(0).is_num() { // Primitive!
+            let p = &PRIMITIVES[self._arg(0).numval() as usize];
+            println!("Primitive {:?}", p.name);
+            if self.argc() != p.arity {
+                panic!("Primitive '{}' expects {} args, given {}", p.name, p.arity, self.argc());
+            }
+            let args = {
+                let v = self.a.oops_r(&self.h);
+                v[1..(v.len() - 2)].to_vec()
+            };
+            let result = match (p.handler)(&mut self.h, &args) {
+                Ok(r) => r,
+                Err(msg) => panic!("Primitive '{}' error: {}", p.name, msg)
+            };
+            self.store(result);
+            self.ret();
+        }
+    }
+    fn jump(&mut self) -> () {
+        let (saved_i, saved_a) = {
+            let r = self.a.oops_r(&self.h);
+            (r[r.len() - 2], r[r.len() - 1])
+        };
+        let w = self.f.oops_w(&mut self.h);
+        let len = w.len();
+        let tmp = w[len-2];
+        w[len-2] = saved_i;
+        w[len-1] = saved_a;
+        self.a = self.f;
+        self.f = tmp;
+        self.i = 0
+    }
+    fn call(&mut self) -> () {
+        let w = self.f.oops_w(&mut self.h);
+        let len = w.len();
+        w[len-1] = self.a;
+        self.a = self.f;
+        self.f = w[len-2];
+        w[len-2] = Oop::num(self.i as RawNum);
+        self.i = 0
+    }
+    fn ret(&mut self) -> () {
+        let r = self.a.oops_r(&self.h);
+        self.i = r[r.len() - 2].numval() as usize;
+        self.a = r[r.len() - 1];
+    }
+    fn clo(&mut self, n: usize) -> Oop {
+        let arity = self.lit(n);
+        let code = self.lit(n+1);
+        let lits = self.lit(n+2);
+        let capturecount = self.lit(n+3).numval() as usize;
+        let c = self.alloc_oops(capturecount + 3);
+        {
+            let w = c.oops_w(&mut self.h);
+            w[0] = arity;
+            w[1] = code;
+            w[2] = lits;
+        }
+        for i in 0..capturecount {
+            let spec = self.lit(i+4).numval();
+            let v = if spec < 0 { self.env((-1 - spec) as usize) } else { self.arg(spec as usize) };
+            c.oops_w(&mut self.h)[i+3] = v;
+        }
+        c
+    }
+    fn next_instruction(&mut self) -> (Bytecode, usize) {
+        let mut ip = self.i;
+        let instr = decode_op(self.code(), &mut ip).unwrap();
+        self.i = ip;
+        instr
+    }
+    fn run(&mut self) -> Oop {
+        loop {
+            if self.a.is_num() {
+                return self.f.oops_r(&self.h)[0]
+            }
+            let (bop, barg) = self.next_instruction();
+            println!("INSTRUCTION: {:?}", (&bop, &barg));
+            match (bop, barg) {
+                (OpLiteral, n) => {
+                    let v = self.lit(n);
+                    self.store(v);
+                }
+                (OpEnvRef, n) => {
+                    let v = self.env(n);
+                    self.store(v);
+                }
+                (OpArgRef, n) => {
+                    let v = self.arg(n);
+                    self.store(v);
+                }
+                (OpFrame, n) => {
+                    self.pushframe(n);
+                }
+                (OpJump, _) => {
+                    self.jump();
+                    self.trap_check();
+                }
+                (OpCall, _) => {
+                    self.call();
+                    self.trap_check();
+                }
+                (OpReturn, _) => {
+                    self.ret();
+                }
+                (OpClosure, n) => {
+                    let v = self.clo(n);
+                    self.store(v);
+                }
             }
         }
     }
@@ -1003,47 +1192,30 @@ mod tests {
     fn roundtrip_bytecode() {
         let mut code = Vec::new();
         encode_op(&mut code, OpLiteral, 0);
-        encode_op(&mut code, OpLiteral, 1);
-        encode_op(&mut code, OpLiteral, 2);
-        encode_op(&mut code, OpLiteral, 14);
-        encode_op(&mut code, OpLiteral, 15);
-        encode_op(&mut code, OpLiteral, 16);
-        encode_op(&mut code, OpLiteral, 20);
-        encode_op(&mut code, OpLiteral, 2000);
-        encode_op(&mut code, OpCallFrame, 0);
-        encode_op(&mut code, OpCallFrame, -1);
-        encode_op(&mut code, OpCallFrame, -2);
-        encode_op(&mut code, OpCallFrame, -14);
-        encode_op(&mut code, OpCallFrame, -15);
-        encode_op(&mut code, OpCallFrame, -16);
-        encode_op(&mut code, OpCallFrame, -20);
-        encode_op(&mut code, OpCallFrame, -2000);
-        assert_eq!([0x00, 0x02, 0x04, 0x1c, 0x1e, 0x1f, 0, 32, 0x1f, 0, 40, 0x1f, 15, 160,
-                    0x80, 0x83, 0x85, 0x9d, 0x9f, 0, 31, 0x9f, 0, 33, 0x9f, 0, 41, 0x9f, 15, 161],
+        encode_op(&mut code, OpEnvRef, 1);
+        encode_op(&mut code, OpArgRef, 2);
+        encode_op(&mut code, OpFrame, 30);
+        encode_op(&mut code, OpJump, 31);
+        encode_op(&mut code, OpCall, 32);
+        encode_op(&mut code, OpReturn, 40);
+        encode_op(&mut code, OpClosure, 2000);
+        assert_eq!([0x00, 0x21, 0x42, 0x7e, 0x9f, 0, 31, 0xbf, 0, 32, 0xdf, 0, 40, 0xff, 7, 208],
                    code.as_slice());
         let mut index = 0;
         assert_eq!((OpLiteral, 0), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpLiteral, 1), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpLiteral, 2), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpLiteral, 14), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpLiteral, 15), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpLiteral, 16), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpLiteral, 20), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpLiteral, 2000), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpCallFrame, 0), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpCallFrame, -1), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpCallFrame, -2), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpCallFrame, -14), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpCallFrame, -15), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpCallFrame, -16), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpCallFrame, -20), decode_op(&code, &mut index).unwrap());
-        assert_eq!((OpCallFrame, -2000), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpEnvRef, 1), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpArgRef, 2), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpFrame, 30), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpJump, 31), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpCall, 32), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpReturn, 40), decode_op(&code, &mut index).unwrap());
+        assert_eq!((OpClosure, 2000), decode_op(&code, &mut index).unwrap());
 
         assert_eq!(OpLiteral, decode_bytecode(OpLiteral as u8).unwrap());
         assert_eq!(OpEnvRef, decode_bytecode(OpEnvRef as u8).unwrap());
         assert_eq!(OpArgRef, decode_bytecode(OpArgRef as u8).unwrap());
-        assert_eq!(OpTailFrame, decode_bytecode(OpTailFrame as u8).unwrap());
-        assert_eq!(OpCallFrame, decode_bytecode(OpCallFrame as u8).unwrap());
+        assert_eq!(OpFrame, decode_bytecode(OpFrame as u8).unwrap());
+        assert_eq!(OpJump, decode_bytecode(OpJump as u8).unwrap());
         assert_eq!(OpCall, decode_bytecode(OpCall as u8).unwrap());
         assert_eq!(OpReturn, decode_bytecode(OpReturn as u8).unwrap());
         assert_eq!(OpClosure, decode_bytecode(OpClosure as u8).unwrap());
@@ -1053,11 +1225,15 @@ mod tests {
     fn test_inject_code_simple() {
         let parsed = parse(&read_one_sexp("((lambda (a b) (+ a b)) 123 234)").unwrap()).unwrap();
         let compiled = compile(&vec![], &vec![], &parsed).unwrap();
-        let mut h = Heap::new(16);
+        let mut h = Heap::new(1024);
         let (codepointer, lit) = compiled.inject(&mut h).unwrap();
         println!("{:?} {:?} {:?}", codepointer, lit, h);
         println!("{}", OopHeap(codepointer, &h));
         println!("{}", OopHeap(lit, &h));
+        let mut vm = VM::boot(h, codepointer, lit);
+        let result = vm.run();
+        assert!(result.is_num());
+        assert_eq!(357, result.numval());
     }
 
     #[test]
