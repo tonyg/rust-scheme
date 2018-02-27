@@ -4,4 +4,4 @@ version = "0.0.1"
 authors = ["Tony Garnock-Jones <tonyg@leastfixedpoint.com>"]
 
 [dependencies]
-itertools = "*"
+itertools = "0.7.6"
