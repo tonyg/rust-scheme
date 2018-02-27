@@ -1000,36 +1000,35 @@ impl VM {
             if self.a.is_num() {
                 return self.f.oops_r(&self.h)[0]
             }
-            let (bop, barg) = self.next_instruction();
-            println!("INSTRUCTION: {:?}", (&bop, &barg));
-            match (bop, barg) {
-                (OpLiteral, n) => {
+            let (op, n) = self.next_instruction();
+            match op {
+                OpLiteral => {
                     let v = self.lit(n);
                     self.store(v);
                 }
-                (OpEnvRef, n) => {
+                OpEnvRef => {
                     let v = self.env(n);
                     self.store(v);
                 }
-                (OpArgRef, n) => {
+                OpArgRef => {
                     let v = self.arg(n);
                     self.store(v);
                 }
-                (OpFrame, n) => {
+                OpFrame => {
                     self.pushframe(n);
                 }
-                (OpJump, _) => {
+                OpJump => {
                     self.jump();
                     self.trap_check();
                 }
-                (OpCall, _) => {
+                OpCall => {
                     self.call();
                     self.trap_check();
                 }
-                (OpReturn, _) => {
+                OpReturn => {
                     self.ret();
                 }
-                (OpClosure, n) => {
+                OpClosure => {
                     let v = self.clo(n);
                     self.store(v);
                 }
